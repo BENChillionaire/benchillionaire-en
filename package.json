@@ -1,0 +1,16 @@
+{
+  "name": "benchillionaire-en",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "setup": "gunzip -kf data/millionaire_questions.json.gz",
+    "bench": "bun bench/run.ts",
+    "scan": "bun bench/scan.ts",
+    "check": "tsc -p ."
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "~6.0.2"
+  }
+}
