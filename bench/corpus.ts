@@ -15,6 +15,8 @@ export interface McQuestion {
   value: string;
   /** Year the show first aired (from the wiki's free-text air date), so "current" questions can be answered as of then. */
   aired: number | null;
+  /** Country of the version it aired on, so local questions can be answered for that country. */
+  country: string | null;
   /** Why the question can't be fairly asked (data/skip-questions.json); empty when it can. */
   skip: string[];
   /** In the private held-out set (data/holdout.json): asked privately, never published. */
@@ -26,7 +28,8 @@ export interface CorpusQuestion {
   round: "main" | "fastest_finger";
   number: number | null;
   of: number | null;
-  type: "multiple_choice" | "order";
+  /** "not_a_question": dropped by data/corrections.json (no factual answer, or options that don't fit the question). */
+  type: "multiple_choice" | "order" | "not_a_question";
   question: string;
   options: Record<Letter, string>;
   answer: string;
@@ -80,8 +83,44 @@ export const EN_COUNTRIES: Record<string, true> = {
   Uganda: true,
   Kenya: true,
 };
-/** Shows in an English-language country that were not in English. */
-const NOT_ENGLISH: Record<string, true> = { "Wie Word 'n Miljoenêr?": true };
+/**
+ * Shows in an English-language country that were not in English: South Africa's Afrikaans version
+ * and India's regional-language versions (KBC itself is kept, see above).
+ */
+const NOT_ENGLISH: Record<string, true> = {
+  "Wie Word 'n Miljoenêr?": true,
+  "Ningalkkum Aakaam Kodeeshwaran": true,
+  "Kus Bani Koshur Crorepati": true,
+  Kodeeswari: true,
+  "Kannadada Kotyadhipati": true,
+  "Ke Bani Crorepati": true,
+  "Kon Hoeel Marathi Crorepati": true,
+  "Ke Hobe Banglar Kotipoti": true,
+  "Evaru Meelo Koteeswarudu": true,
+};
+
+/**
+ * Pages whose wiki infobox names the wrong version, by page title: the version the questions
+ * actually aired on, checked against the page's prizes and questions (2026-10-19), or null for
+ * pages that record no real airing (parodies, pranks, fictional contestants, a page mixing versions).
+ */
+const PAGE_COUNTRY: Record<string, string | null> = {
+  "Paul Nolan (UK)": "UK",
+  "Who Wants to Be a Millionaire? (Australia)": "Australia",
+  "Who Wants to Be a Millionaire (USA)": "USA",
+  "David Thompson (U.S. Season 15)": "USA",
+  "Aamir Khan": "Turkey",
+  "Qui veut gagner des millions? (France)": "France",
+  "Who Wants to Be a Millionaire? (Philippines)": "Philippines",
+  Milionerzy: "Poland",
+  "Kto khochet stat' millionerom?": "Russia",
+  "Who Wants to Be a Millionaire? (UK version)": null,
+  "Kaun Banega Crorepati": null,
+  "50:50": null,
+  "Paul Lassiter": null,
+  "Vem vill bli miljonär?": null,
+  "Jamal Malik": null,
+};
 
 export const inEnBenchmark = (show: CorpusShow) =>
   Boolean(show.country && EN_COUNTRIES[show.country] && !(show.show && NOT_ENGLISH[show.show]));
@@ -99,32 +138,75 @@ export interface Holdout {
 
 export interface Corpus {
   sha256: string;
+  /** The questions with data/corrections.json applied. */
   shows: CorpusShow[];
   /** Question key → reasons it is skipped (bench/scan.ts writes the list). */
   skip: Record<string, string[]>;
   skipSha256: string;
+  correctionsSha256: string;
   /** Null where the file is absent, as in the public repo (whose corpus has the held-out questions blanked). */
   holdout: Holdout | null;
 }
 
+/**
+ * One entry of data/corrections.json, keyed by question key: the answer as of the air date where
+ * the wiki's key is wrong (`was` is the wiki's), or `answer: null` to drop an item that can't be
+ * asked as recorded (no factual answer, or options from another question). Answers are option
+ * text, so each entry reads on its own and is checked against
+ * the corpus on load.
+ */
+export interface Correction {
+  question: string;
+  answer: string | null;
+  was: string;
+}
+
 const CORPUS_PATH = new URL("../data/millionaire_questions.json", import.meta.url);
 const SKIP_PATH = new URL("../data/skip-questions.json", import.meta.url);
+const CORRECTIONS_PATH = new URL("../data/corrections.json", import.meta.url);
 const HOLDOUT_PATH = new URL("../data/holdout.json", import.meta.url);
 
 const keySet = (keys: string[]): Record<string, true> => Object.fromEntries(keys.map((k) => [k, true]));
+
+function applyCorrections(shows: CorpusShow[], corrections: Record<string, Correction>) {
+  for (const [key, c] of Object.entries(corrections)) {
+    const [s, i] = key.split(":").map(Number);
+    const q = shows[s]?.questions[i];
+    if (!q || q.question !== c.question || q.options[q.answer as Letter] !== c.was) {
+      throw new Error(`data/corrections.json: ${key} does not match the corpus`);
+    }
+    if (c.answer === null) {
+      q.type = "not_a_question";
+      continue;
+    }
+    const letters = LETTERS.filter((l) => q.options[l] === c.answer);
+    if (letters.length !== 1) throw new Error(`data/corrections.json: ${key} answer "${c.answer}" is not exactly one option`);
+    q.answer = letters[0];
+  }
+}
+
+/** data/corrections.json as written: one entry per line, keys in corpus order. */
+export function correctionsJson(corrections: Record<string, unknown>): string {
+  const order = (key: string) => key.split(":").map(Number);
+  const keys = Object.keys(corrections).sort((a, b) => order(a)[0] - order(b)[0] || order(a)[1] - order(b)[1]);
+  return `{\n${keys.map((key) => `  ${JSON.stringify(key)}: ${JSON.stringify(corrections[key])}`).join(",\n")}\n}\n`;
+}
 
 export async function loadCorpus(): Promise<Corpus> {
   const hash = (bytes: ArrayBuffer) => new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
   const bytes = await Bun.file(CORPUS_PATH).arrayBuffer();
   const skipBytes = await Bun.file(SKIP_PATH).arrayBuffer();
+  const correctionBytes = await Bun.file(CORRECTIONS_PATH).arrayBuffer();
   const { shows } = JSON.parse(new TextDecoder().decode(bytes)) as { shows: CorpusShow[] };
   const { questions: skip } = JSON.parse(new TextDecoder().decode(skipBytes)) as { questions: Record<string, string[]> };
+  applyCorrections(shows, JSON.parse(new TextDecoder().decode(correctionBytes)) as Record<string, Correction>);
+  for (const show of shows) if (Object.hasOwn(PAGE_COUNTRY, show.page)) show.country = PAGE_COUNTRY[show.page];
   const holdoutFile = Bun.file(HOLDOUT_PATH);
   const held = (await holdoutFile.exists())
     ? ((await holdoutFile.json()) as { games: string[]; questions: string[]; droppedPublicGames: string[] })
     : null;
   const holdout = held && { games: keySet(held.games), questions: keySet(held.questions), droppedGames: keySet(held.droppedPublicGames) };
-  return { sha256: hash(bytes), shows, skip, skipSha256: hash(skipBytes), holdout };
+  return { sha256: hash(bytes), shows, skip, skipSha256: hash(skipBytes), correctionsSha256: hash(correctionBytes), holdout };
 }
 
 /**
@@ -145,6 +227,7 @@ export function toMcQuestion(corpus: Corpus, showIndex: number, questionIndex: n
     of: q.round === "main" ? q.of : null,
     value: q.value,
     aired: airedYear(show.air_date),
+    country: show.country,
     skip: corpus.skip[key] ?? [],
     heldOut: Boolean(corpus.holdout?.questions[key]),
   };

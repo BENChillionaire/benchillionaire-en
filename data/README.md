@@ -7,7 +7,8 @@ Fandom, written by the wiki's contributors and licensed under
 
 Changes from the source: the questions were extracted from the wiki's question templates into JSON,
 with options, the correct answer, round, ladder position, prize, country and air date as separate
-fields. Retrieved 2026-10-11.
+fields. Retrieved 2026-10-11. Wrong answer keys are corrected, and items that can't be asked as
+recorded dropped, in `corrections.json`, which records each original answer.
 
 `skip-questions.json` (the questions the benchmark leaves out, with reasons) and the results table in
 the README are derived from that data, so they are released under the same licence,

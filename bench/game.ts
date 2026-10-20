@@ -4,7 +4,7 @@ import { pack, pool, type DecisionClient, type DecisionItem, type ItemAnswer } f
 import { guaranteedPositions, parsePrize, USD_LADDER } from "./ladder";
 import { askTheAudience, fiftyFifty, LIFELINES, phoneAFriend, type Lifeline, type Spot } from "./lifelines";
 import { stream } from "./rng";
-import { QUESTION_CONTEXT } from "./type1";
+import { askedNote, QUESTION_CONTEXT } from "./type1";
 
 /** What happens when a game has no aired, text-only question for the next rung. */
 export type OutOfQuestions = "fill" | "cutoff" | "complete";
@@ -194,9 +194,11 @@ interface Play {
   removed: Letter[];
   audience: Record<Letter, number> | null;
   friend: Letter | null;
-  /** Questions answered correctly; this, not the question position, sets the money (refusals advance without pay). */
+  /** Questions passed with pay: answered right, skipped, or refused. This, not the position, sets the money. */
   correct: number;
   refused: number;
+  /** What the game would have won had its first refusal counted as a wrong answer; null until a refusal. */
+  refusalLoses: number | null;
   history: Step[];
   winnings: number | null;
 }
@@ -228,11 +230,12 @@ function gameContext(lifelines: boolean): string {
 
 const remainingOf = (play: Play) => LETTERS.filter((l) => !play.removed.includes(l));
 
-/** The question as it stands: text, the options still on the board, when it was asked, and lifeline results. */
+/** The question as it stands: text, the options still on the board, where and when it was asked, and lifeline results. */
 function board(play: Play): string {
   const q = play.game.rungs[play.pos].question;
   const parts = [`${q.question} ${remainingOf(play).map((l) => `${l}: ${q.options[l]}`).join("; ")}.`];
-  if (q.aired) parts.push(`(Asked in ${q.aired}.)`);
+  const note = askedNote(q);
+  if (note) parts.push(note);
   if (play.removed.length) parts.push(`50:50 removed ${play.removed.join(" and ")}.`);
   if (play.audience) parts.push(`The audience voted ${Object.entries(play.audience).map(([l, v]) => `${l} ${v}%`).join(", ")}.`);
   if (play.friend) parts.push(`A friend thinks it's ${play.friend}.`);
@@ -291,6 +294,7 @@ export function promptSamples() {
     of: 15,
     value: "",
     aired: 2001,
+    country: "UK",
     skip: [],
     heldOut: false,
   };
@@ -309,6 +313,7 @@ export function promptSamples() {
     friend: null,
     correct: 6,
     refused: 0,
+    refusalLoses: null,
     history: [],
     winnings: null,
   };
@@ -348,9 +353,10 @@ function passSkipped(play: Play) {
 }
 
 /**
- * Answer step. A refusal (the provider refused this question even asked on its own) moves the
- * game to the next question as if answered, but earns no money rung, so n refusals cap the game
- * at the prize of rung (length − n).
+ * Answer step. A refusal (the provider refused this question even asked on its own) is passed like
+ * a skipped question: it pays its rung and the game goes on. The first refusal also records what
+ * the game would have won had it been a wrong answer (`refusalLoses`), so results can count
+ * refusals either way.
  */
 function applyAnswer(play: Play, answer: ItemAnswer) {
   const position = play.pos + 1;
@@ -361,7 +367,10 @@ function applyAnswer(play: Play, answer: ItemAnswer) {
   const refused = answer.choice === null && answer.refusals > 0;
   play.history.push({ position, stage: "answer", choice: answer.choice, refused, probabilities: answer.probabilities });
   if (refused) {
+    if (play.refused === 0) play.refusalLoses = guaranteed(play);
     play.refused++;
+    play.correct++;
+    play.bank = play.game.ladder[play.correct - 1];
     advance(play);
     return;
   }
@@ -445,6 +454,7 @@ export async function playGames(
     friend: null,
     correct: 0,
     refused: 0,
+    refusalLoses: null,
     history: [],
     winnings: null,
   }));
@@ -512,6 +522,8 @@ export async function playGames(
   }
 
   for (const play of plays) play.winnings = play.exit === "failed" || play.exit === "unfinished" ? null : play.bank;
+  /** Winnings with the first refusal counted as a wrong answer (the game as played, cut there). */
+  const refusalLosesOf = (p: Play) => (p.winnings === null ? null : (p.refusalLoses ?? p.winnings));
   await appendFile(
     opts.out,
     plays
@@ -526,6 +538,7 @@ export async function playGames(
           correct: p.correct,
           refused: p.refused,
           winnings: p.winnings,
+          winningsRefusalLoses: refusalLosesOf(p),
           borrowedRungs: p.game.rungs.filter((r) => r.borrowed).length,
           lifelinesUsed: p.lifelinesUsed,
           history: p.history,
@@ -537,6 +550,10 @@ export async function playGames(
   const scored = plays.filter((p) => p.winnings !== null);
   const winningsByCurrency: Record<string, number> = {};
   for (const p of scored) winningsByCurrency[p.game.currency] = (winningsByCurrency[p.game.currency] ?? 0) + p.winnings!;
+  const winningsRefusalLosesByCurrency: Record<string, number> = {};
+  for (const p of scored) {
+    winningsRefusalLosesByCurrency[p.game.currency] = (winningsRefusalLosesByCurrency[p.game.currency] ?? 0) + refusalLosesOf(p)!;
+  }
   const exits: Record<string, number> = {};
   for (const p of plays) exits[p.exit!] = (exits[p.exit!] ?? 0) + 1;
   const lockIns = plays.flatMap((p) => p.history.filter((h) => h.correct !== undefined));
@@ -551,6 +568,8 @@ export async function playGames(
     scoredGames: scored.length,
     exits,
     winningsByCurrency,
+    winningsRefusalLosesByCurrency,
+    gamesWithRefusal: plays.filter((p) => p.refused > 0).length,
     meanWinningsByCurrency: Object.fromEntries(
       Object.entries(winningsByCurrency).map(([c, total]) => [c, total / scored.filter((p) => p.game.currency === c).length]),
     ),

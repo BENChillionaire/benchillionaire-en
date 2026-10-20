@@ -1,4 +1,4 @@
-// Millionaire benchmark for decision models on OpenRouter.
+// Millionaire benchmark for System One models on OpenRouter.
 //
 //   bun bench/run.ts type1 --range corpus                   # every question, batched (throughput)
 //   bun bench/run.ts type2                                    # games: lock in or walk away
@@ -7,23 +7,25 @@
 //   bun bench/run.ts type4 --games 100                        # type3 rules, one call per question
 //   bun bench/run.ts latency --limit 500                      # one question per request (single-question latency)
 //
-// Common: --deciders a,b --seed N --batch N|max --concurrency N|all --max-usd X --timeout-ms N --dry-run
+// Common: --deciders a,b --seed N --batch N|max --concurrency N|all --max-usd X --timeout-ms N --dry-run --resume <run dir>
 // Requests pack as many questions as fit each model's input limit; --batch N caps the count.
 // --concurrency defaults to 1: one batch at a time.
+// --resume reuses every successful response of an interrupted run (out of credit, killed, over budget):
+// with the same seed the run sends the same requests in order, so only the missing ones are paid for.
 //
 // Deciders run one after another; each run is timed from its first request to its last
 // answer. Every random draw (sampling, borrowed questions, lifeline outcomes) comes from
 // --seed, so all deciders face identical questions and luck. Network failures, rate limits
 // and server errors are retried (refusals never are); a call that still fails is recorded and
 // its questions/games count as failed. Once reported spend reaches --max-usd no new call starts.
-// The manifest records the corpus, skip list and a fingerprint of the exact prompt wording.
+// The manifest records the corpus, skip list, answer corrections and a fingerprint of the exact prompt wording.
 
 import { mkdir, writeFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 import { createHash } from "node:crypto";
 import { allMcQuestions, loadCorpus, type McQuestion } from "./corpus";
-import { Budget, DecisionClient, RETRY_DELAYS_MS } from "./decide";
-import { DECIDERS } from "./deciders";
+import { Budget, DecisionClient, loadReplay, RETRY_DELAYS_MS } from "./decide";
+import { DECIDERS } from "../shared/decisions";
 import { buildGames, playGames, promptSamples, type Currency, type Game, type OutOfQuestions } from "./game";
 import { sample, stream } from "./rng";
 import { loadSecret } from "./secrets";
@@ -36,9 +38,11 @@ const { values: args, positionals } = parseArgs({
     seed: { type: "string", default: "1" },
     batch: { type: "string", default: "max" },
     concurrency: { type: "string" },
-    "max-usd": { type: "string", default: "0.25" },
+    // Default: MAX_USD for the run type.
+    "max-usd": { type: "string" },
     "timeout-ms": { type: "string", default: "120000" },
     "dry-run": { type: "boolean", default: false },
+    resume: { type: "string" },
     // type1
     range: { type: "string", default: "all" },
     limit: { type: "string" },
@@ -70,7 +74,12 @@ const num = (name: string, raw: string | undefined, fallback: number) => {
 const seed = num("seed", args.seed, 1);
 // One batch at a time unless overridden.
 const concurrency = num("concurrency", args.concurrency ?? "1", Infinity);
-const maxUsd = num("max-usd", args["max-usd"], 0.25);
+/**
+ * Default spend cap per run, all deciders together: about 1.5× what each full v2 run cost with all
+ * six models (2026-10-20: Type 1 $8.76, Type 2 $15.35, lock-in $6.36, Type 3 $24.46, latency $0.08).
+ */
+const MAX_USD: Record<(typeof RUN_TYPES)[number], number> = { type1: 13, type2: 23, lockin: 10, type3: 37, type4: 5, latency: 0.15 };
+const maxUsd = num("max-usd", args["max-usd"], MAX_USD[runType]);
 const timeoutMs = num("timeout-ms", args["timeout-ms"], 120_000);
 const batch = args.batch === "max" ? Infinity : num("batch", args.batch, Infinity);
 const deciders = args.deciders.split(",").map((id) => {
@@ -136,6 +145,7 @@ const promptSample = {
     question: "Which planet is known as the Red Planet?",
     options: { A: "Venus", B: "Mars", C: "Jupiter", D: "Saturn" },
     aired: 2001,
+    country: "UK",
   }),
   game: promptSamples(),
 };
@@ -149,25 +159,36 @@ const version = (await Bun.file(new URL("version.json", import.meta.url)).json()
   name: string;
   corpusSha256: string;
   skipListSha256: string;
+  correctionsSha256: string;
   promptsSha256: string;
   seed: number;
 };
 const frozen =
   version.corpusSha256 === corpus.sha256 &&
   version.skipListSha256 === corpus.skipSha256 &&
+  version.correctionsSha256 === corpus.correctionsSha256 &&
   version.promptsSha256 === promptSha256 &&
   version.seed === seed;
-console.log(frozen ? `benchmark ${version.name}` : `NOT ${version.name}: corpus, skip list, prompts or seed differ from bench/version.json`);
+console.log(frozen ? `benchmark ${version.name}` : `NOT ${version.name}: corpus, skip list, corrections, prompts or seed differ from bench/version.json`);
 if (args.freeze) {
-  const next = { ...version, corpusSha256: corpus.sha256, skipListSha256: corpus.skipSha256, promptsSha256: promptSha256, seed };
+  const next = {
+    ...version,
+    corpusSha256: corpus.sha256,
+    skipListSha256: corpus.skipSha256,
+    correctionsSha256: corpus.correctionsSha256,
+    promptsSha256: promptSha256,
+    seed,
+  };
   await writeFile(new URL("version.json", import.meta.url), JSON.stringify(next, null, 2) + "\n");
-  console.log(`froze ${version.name} at the current corpus, skip list, prompts and seed`);
+  console.log(`froze ${version.name} at the current corpus, skip list, corrections, prompts and seed`);
   process.exit(0);
 }
 if (!frozen && !args.unfrozen && !args["dry-run"]) throw new Error("Refusing to run off the frozen version; pass --unfrozen for experiments.");
 if (args["dry-run"]) process.exit(0);
 
 const apiKey = await loadSecret("OPENROUTER", "API_TOKEN");
+const replay = args.resume ? await loadReplay(args.resume.replace(/\/$/, "")) : undefined;
+if (replay) console.log(`resuming: ${replay.size} recorded responses from ${args.resume}`);
 const runId = `${new Date().toISOString().replace(/[:.]/g, "-")}-${runType}-seed${seed}`;
 const runDir = new URL(`../runs/${runId}/`, import.meta.url);
 await mkdir(runDir, { recursive: true });
@@ -184,10 +205,12 @@ await writeFile(
         path: "data/millionaire_questions.json",
         sha256: corpus.sha256,
         skipList: { path: "data/skip-questions.json", sha256: corpus.skipSha256 },
+        corrections: { path: "data/corrections.json", sha256: corpus.correctionsSha256 },
       },
       seed,
       benchmark: { name: version.name, frozen },
       deciders,
+      resumedFrom: replay ? [...replay.values()][0]?.runId ?? null : null,
       prompts: { sha256: promptSha256, sample: promptSample },
       policy: {
         packing: runType === "type4" || runType === "latency" ? "one question per request" : "token-budget",
@@ -210,10 +233,13 @@ await writeFile(
 const budget = new Budget(maxUsd);
 const summaries: unknown[] = [];
 for (const decider of deciders) {
-  const client = new DecisionClient(decider, apiKey, calls, timeoutMs, budget);
+  const client = new DecisionClient(decider, apiKey, calls, timeoutMs, budget, replay);
   if (questionRun) {
     for (const set of type1Sets) {
       const s = await runType1(client, set.range, set.questions, { batch: runType === "latency" ? 1 : batch, concurrency, out: results });
+      // Wall time includes the recorded latency of reused responses, as if asked in this run.
+      s.wallMs += client.replayedMs;
+      client.replayedMs = 0;
       summaries.push(s);
       console.log(
         `${decider.id} ${set.range}: ${s.correct}/${s.questions} correct (${((s.accuracy ?? 0) * 100).toFixed(1)}%), ${s.skipped} skipped, ` +
@@ -232,9 +258,11 @@ for (const decider of deciders) {
       concurrency,
       out: results,
     });
+    s.wallMs += client.replayedMs;
     summaries.push(s);
     console.log(
-      `${decider.id}: winnings ${JSON.stringify(s.winningsByCurrency)} over ${s.scoredGames}/${s.games} games, ` +
+      `${decider.id}: winnings ${JSON.stringify(s.winningsByCurrency)} (refusals as losses ${JSON.stringify(s.winningsRefusalLosesByCurrency)}, ` +
+        `${s.gamesWithRefusal} games with a refusal) over ${s.scoredGames}/${s.games} games, ` +
         `exits ${JSON.stringify(s.exits)}, ${s.answeredCorrectly}/${s.answered} answers correct, ` +
         `lifelines ${JSON.stringify(s.lifelinesUsed)}, walked at ${JSON.stringify(s.walkAwaysAtQuestion)}, $${s.costUsd.toFixed(6)}, ` +
         `${(s.wallMs / 1000).toFixed(2)}s wall, ${s.rounds} rounds / ${s.calls} calls, refused steps ${JSON.stringify(s.refusedSteps)}, ` +

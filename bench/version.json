@@ -1,7 +1,42 @@
 {
-  "name": "benchillionaire-en v1",
+  "name": "benchillionaire-en v2",
   "corpusSha256": "2df7be9ffcfd927f9718aac1dacad4bed4dbd3a5f97cb98a39bb1b2702299671",
-  "skipListSha256": "e73b5801f68733ad7cff6ab97857017985c30fd20639587a7cdec319270595bd",
-  "promptsSha256": "4ff833f4124d6cfb0528ea9ec23107a86edb03243dc63eb29e19e4b238e71b19",
-  "seed": 1
+  "skipListSha256": "0bb67632be001caf9adaec9f50791647cc539aeda03232fe84df6fd29fe9ced9",
+  "promptsSha256": "4eec163a99323f05a69fa784e6b9f472bc00d96096846f2ba37eb2e76f4ab546",
+  "seed": 1,
+  "correctionsSha256": "e5a55cce1112617f4b56c60c3be9d6e6f0b5b7e6a7b224bbb049e9d0d0d10c16",
+  "models": {
+    "checked": "2026-10-20",
+    "note": "Realized model snapshots from a one-question live check (runs/2026-10-20T00-33-05-595Z-latency-seed1); identical to the v1 runs. Clef and Clef-omni from their v2 Type 1 runs (2026-10-20); Cloudflare reports no dated snapshot for Clef.",
+    "jev-1.13": {
+      "request": "typesafe/jev-1.13",
+      "realized": "typesafe/jev-1.13-20260917",
+      "provider": "TypeSafe"
+    },
+    "jev-1.14": {
+      "request": "typesafe/jev-1.14",
+      "realized": "typesafe/jev-1.14-20261014",
+      "provider": "TypeSafe"
+    },
+    "microsoft-decision-1": {
+      "request": "microsoft/microsoft-decision-1",
+      "realized": "microsoft/microsoft-decision-1-20261009",
+      "provider": "Azure"
+    },
+    "gpt-6-luna-decisions": {
+      "request": "openai/gpt-6-luna-decisions",
+      "realized": "openai/gpt-6-luna-decisions-20261006",
+      "provider": "OpenAI"
+    },
+    "clef": {
+      "request": "cloudflare/clef",
+      "realized": "cloudflare/clef",
+      "provider": "Cloudflare"
+    },
+    "clef-omni": {
+      "request": "cloudflare/clef-omni",
+      "realized": "cloudflare/clef-omni-20261009",
+      "provider": "Cloudflare"
+    }
+  }
 }

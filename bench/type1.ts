@@ -27,20 +27,31 @@ interface CloseCall {
 
 /** Request state for question batches: the guidance every question shares. */
 export const QUESTION_CONTEXT =
-  "Each question has exactly one correct option. Questions may rely on wordplay. Answer each as of the year it was asked, when given.";
+  "Each question has exactly one correct option. Questions may rely on wordplay. Answer each as of the year it was asked and for the country it was asked in, when given.";
+
+/** Corpus country names that read with "the" ("Asked in the UK in 2004."). */
+const WITH_THE: Record<string, true> = { UK: true, USA: true };
+
+/** Where and when a question was asked, as the model is told it: "(Asked in India in 2004.)"; empty when neither is known. */
+export function askedNote(q: Pick<McQuestion, "aired" | "country">): string {
+  const where = q.country ? ` in ${WITH_THE[q.country] ? "the " : ""}${q.country}` : "";
+  const when = q.aired ? ` in ${q.aired}` : "";
+  return where || when ? `(Asked${where}${when}.)` : "";
+}
 
 /**
  * One multiple-choice question as a decision item: the question itself, with its options
- * written out and the year it was asked, is the instruction; shared guidance is the request
+ * written out and where and when it was asked, is the instruction; shared guidance is the request
  * state (`QUESTION_CONTEXT`). With the options written out, GPT-6 Luna Decisions answers pun
  * and trick questions ("Which of these is a type of hat?" → Pork pie) that it refuses when it
  * sees the options only as answer choices, and OpenRouter fails a whole request for one refusal.
  */
-export function questionItem(id: string, q: Pick<McQuestion, "question" | "options" | "aired">): DecisionItem {
+export function questionItem(id: string, q: Pick<McQuestion, "question" | "options" | "aired" | "country">): DecisionItem {
   const written = LETTERS.map((l) => `${l}: ${q.options[l]}`).join("; ");
+  const note = askedNote(q);
   return {
     id,
-    instructions: `${q.question} ${written}.${q.aired ? ` (Asked in ${q.aired}.)` : ""}`,
+    instructions: `${q.question} ${written}.${note ? ` ${note}` : ""}`,
     options: Object.fromEntries(LETTERS.map((l) => [l, q.options[l]])),
   };
 }

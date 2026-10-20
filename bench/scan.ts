@@ -1,23 +1,23 @@
 // Scans the corpus for questions that can't be fairly asked and writes the skip list every run
 // and the playable game read: data/skip-questions.json, { rules, questions: { "<show>:<question>": [reasons] } }.
 //
-//   bun bench/scan.ts [runs/<type1 run> …]
+//   bun bench/scan.ts
 //
-// Text rules run over every multiple-choice question. Type 1 runs given as arguments add the
-// model-based rules (a question every model in that run got wrong, or one a provider refused even
-// when asked alone). A skipped question is never asked: Type 1 leaves it neutral, game runs pass
-// it automatically (it pays its rung, no decision, no lifeline, no walk), and the playable game
-// never draws it.
+// Text rules run over every multiple-choice question; data/context-review.json (bench/context.ts:
+// candidates checked by a model for missing context, plus hand-reviewed broken records) adds the
+// rest. A skipped question is never asked: Type 1 leaves it neutral, game runs pass it
+// automatically (it pays its rung, no decision, no lifeline, no walk), and the playable game never
+// draws it. Questions every model gets wrong are not skipped (a hard question with its context
+// given is fair; wrong answer keys are fixed in data/corrections.json), nor are refusals (they
+// count as wrong in Type 1, and games report them both as a loss and as a pass).
 
 import { writeFile } from "node:fs/promises";
 import { airedYear, type CorpusQuestion, type CorpusShow } from "./corpus";
 
 export const SKIP_RULES = {
-  media: "Needs a picture, audio or video clip the corpus doesn't have (wiki flag or wording such as \"Whose voice is this?\").",
-  malformed: "Broken record: missing or duplicate options, an answer outside A–D, or an empty question.",
-  undated: "Asks about the present (\"current\", \"this year\", \"now\") but the show's air date is unknown.",
-  all_models_wrong: "Every model got it wrong in a Type 1 run: a broken answer key or translation is likely, though some are just very hard.",
-  refused: "A provider refused it even when asked on its own.",
+  media: "Needs a picture, audio or video clip the corpus doesn't have (wiki flag, wording such as \"Whose voice is this?\", or judged by a model to refer to something not shown).",
+  malformed: "Broken record: missing, duplicate or mismatched options, an answer outside A–D, or an empty question.",
+  undated: "Its answer depends on when it was asked, but the show's air date is unknown (wording such as \"current\", or judged by a model).",
 } as const;
 export type SkipReason = keyof typeof SKIP_RULES;
 
@@ -62,29 +62,14 @@ if (import.meta.main) {
     }),
   );
 
-  const sources: string[] = [];
-  for (const dir of process.argv.slice(2)) {
-    const base = dir.replace(/\/$/, "");
-    const { runId } = (await Bun.file(`${base}/manifest.json`).json()) as { runId: string };
-    sources.push(runId);
-    const rows = (await Bun.file(`${base}/questions.jsonl`).text())
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line) as { decider: string; key: string; correct: boolean; choice: string | null; refusals: number });
-    const deciders = new Set(rows.map((r) => r.decider)).size;
-    const byKey: Record<string, typeof rows> = {};
-    for (const r of rows) (byKey[r.key] ??= []).push(r);
-    for (const [key, list] of Object.entries(byKey)) {
-      if (list.length === deciders && list.every((r) => !r.correct)) add(key, "all_models_wrong");
-      if (list.some((r) => r.choice === null && r.refusals > 0)) add(key, "refused");
-    }
+  const reviewed = (await Bun.file(new URL("../data/context-review.json", import.meta.url)).json()) as Record<string, SkipReason>;
+  for (const [key, reason] of Object.entries(reviewed)) {
+    if (!(reason in SKIP_RULES)) throw new Error(`data/context-review.json: ${key} has unknown reason "${reason}"`);
+    add(key, reason);
   }
 
   const counts: Record<string, number> = {};
   for (const reasons of Object.values(skip)) for (const r of reasons) counts[r] = (counts[r] ?? 0) + 1;
-  await writeFile(
-    new URL("../data/skip-questions.json", import.meta.url),
-    JSON.stringify({ rules: SKIP_RULES, modelRunsUsed: sources, counts, questions: skip }) + "\n",
-  );
-  console.log(`skip list: ${Object.keys(skip).length} questions`, counts, sources.length ? `(model rules from ${sources.join(", ")})` : "");
+  await writeFile(new URL("../data/skip-questions.json", import.meta.url), JSON.stringify({ rules: SKIP_RULES, counts, questions: skip }) + "\n");
+  console.log(`skip list: ${Object.keys(skip).length} questions`, counts);
 }
